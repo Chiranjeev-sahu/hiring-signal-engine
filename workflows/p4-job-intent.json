@@ -1,0 +1,38 @@
+{
+  "name": "P4 — Job Intent",
+  "id": "no7NBSwEIY5zzvKi",
+  "url": "https://n8n-production-c12e4.up.railway.app/workflow/no7NBSwEIY5zzvKi",
+  "description": "Professional single workflow — Webhook + Manual triggers (publishable), Apify live, Text BIG-PICKLE swap documented, Slack Block Kit, dedup. Live on https://n8n-production-c12e4.up.railway.app/workflow/no7NBSwEIY5zzvKi (active).",
+  "nodes": [
+    {"name": "Manual Trigger", "type": "n8n-nodes-base.manualTrigger"},
+    {"name": "Webhook Trigger", "type": "n8n-nodes-base.webhook", "path": "p4-intent"},
+    {"name": "Load sample posting", "type": "n8n-nodes-base.code", "note": "Sample: Hasura Marketo->HubSpot migration (new data 2026-08-29) — for webhook, posting_text comes from webhook body; for demo, hardcoded"},
+    {"name": "Extract intent", "type": "n8n-nodes-base.code", "note": "Code mock mirrors src/extract.mjs strict validator (24/24 TDD); swap for n8n-nodes-base.openAi Text BIG-PICKLE via https://opencode.ai/zen/v1 + validator for live reasoning"},
+    {"name": "Has intent? (IF)", "type": "n8n-nodes-base.if"},
+    {"name": "Waterfall", "type": "n8n-nodes-base.code", "note": "Apollo blocked free → Prospeo tier2 hit → ZeroBounce mock valid (probes exec 163-166); live HTTP waterfall with trail when free-tier paid"},
+    {"name": "Is valid email? (IF)", "type": "n8n-nodes-base.if"},
+    {"name": "Build Company payload", "type": "n8n-nodes-base.code"},
+    {"name": "Create Company", "type": "n8n-nodes-base.httpRequest", "credentials": "HubSpot P4 placeholder"},
+    {"name": "Build Contact payload", "type": "n8n-nodes-base.code"},
+    {"name": "Create Contact", "type": "n8n-nodes-base.httpRequest", "credentials": "HubSpot P4 placeholder"},
+    {"name": "Prep Deal payload", "type": "n8n-nodes-base.code"},
+    {"name": "Create Deal", "type": "n8n-nodes-base.httpRequest", "credentials": "HubSpot P4 placeholder"},
+    {"name": "Ensure Campaign Paused", "type": "n8n-nodes-base.httpRequest", "credentials": "Smartlead API key placeholder"},
+    {"name": "Build Smartlead payload", "type": "n8n-nodes-base.code"},
+    {"name": "Enroll to Smartlead", "type": "n8n-nodes-base.httpRequest", "credentials": "Smartlead API key placeholder"},
+    {"name": "Build Slack payload", "type": "n8n-nodes-base.code"},
+    {"name": "Slack Post", "type": "n8n-nodes-base.httpRequest", "credentials": "Slack P3 HTTP Header placeholder", "channel": "C0BN1L6KDBR #all-fafo"}
+  ],
+  "stickies": [
+    {"name": "Lane 1 — Apify + LLM (intent) — Webhook / Manual → Extract → Has intent?", "color": 3, "nodes": ["Manual Trigger", "Webhook Trigger", "Load sample posting", "Extract intent", "Has intent?"]},
+    {"name": "Lane 2 — Waterfall (Apollo blocked → Prospeo tier2 → ZeroBounce valid)", "color": 4, "nodes": ["Waterfall", "Is valid email?"]},
+    {"name": "Lane 3 — HubSpot + Smartlead + Slack (portal 247212224, PAUSED 3849492, #all-fafo)", "color": 5, "nodes": ["Build Company payload", "Create Company", "Build Contact payload", "Create Contact", "Prep Deal payload", "Create Deal", "Ensure Campaign Paused", "Build Smartlead payload", "Enroll to Smartlead", "Build Slack payload", "Slack Post"]}
+  ],
+  "credentials_scrubbed": true,
+  "live_executions": {
+    "workos": {"company": "342725706426", "contact": "542944411344", "deal": "344734279362", "smartlead": "4442705207"},
+    "retool_new": {"company": "342684954305", "contact": "542821728956", "deal": "344852116170", "smartlead": "4443116193", "note": "dealname undefined bug before fix"},
+    "hasura_new": {"company": "342777105128", "contact": "542877837049", "deal": "344855716594", "smartlead": "4443124488", "tool": "HubSpot", "pain": "CRM migration bandwidth"}
+  },
+  "fixtures": ["tests/fixtures/hubspot-props-p4.json", "tests/fixtures/apify-careers.json", "tests/fixtures/llm-cases.json", "tests/fixtures/waterfall-p4.json", "tests/fixtures/hubspot-deal-p4.json"]
+}
