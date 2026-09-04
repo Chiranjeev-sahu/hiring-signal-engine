@@ -1,91 +1,118 @@
-# Project 4 — GTM Hiring Signal Engine
+# GTM Hiring Signal Engine
 
 Turns a company name into a verified hiring signal with the right person, their email, and a Slack alert — no Clay, no custom code, single n8n workflow.
 
-## Overview
+## Project Overview
+
+Finding companies that are actually hiring for GTM roles is slow. Teams scrape careers pages, read 20 postings, guess if its intent, then hunt for the hiring manager.
+
+This automation solves that by taking a company name + optional careers URL, discovering the careers page via Tavily, searching current GTM openings, classifying the single strongest signal with an LLM, then finding and verifying the right person via a cheap-first waterfall. Only valid email + positive intent reaches HubSpot/Slack.
+
+## The Problem
+
+Without an automated engine:
+
+- Teams manually open careers pages
+- Generic AI personalization misses real intent
+- Wrong person contacted (recruiter vs hiring manager)
+- Unverified emails bounce and hurt deliverability
+- No quarantine reason when intent/person/email fails
+
+## The Solution
+
+This n8n workflow automatically:
+
+1. Receives Tally webhook {company_name, domain, careers_url?}
+2. Discovers careers page: Tavily Search -> Choose best URL -> Tavily Extract (or direct Extract if URL supplied)
+3. Searches current GTM jobs via Tavily Search (include_raw_content: true, 24k chars max)
+4. Classifies with OpenRouter minimax (8 signals: RevOps/SalesOps/MarketingOps/GTM/CRM/Sales Enablement/Demand Gen/Business Systems) — score >=0.55, confidence >=0.55, evidence required
+5. Gate: has_intent === true else quarantine (no_hiring_intent)
+6. Finds person — Tier 1: Hunter domain search (limit 10) + function scoring (RevOps/GTM/SalesOps/MarketingOps/CRM, threshold >=100) -> Select Best Person
+7. Fallback Tier 2: Tavily LinkedIn search site:linkedin.com/in + company + target_terms -> Parse -> score >=0.75 (current employees only)
+8. Gets email — Prospeo via LinkedIn URL -> Dropcontact fallback (45s wait) -> ZeroBounce verify (only valid proceeds)
+9. Valid -> HubSpot upsert contact + Slack Block Kit to #all-fafo | Invalid -> quarantine with reason
+
+## Workflow
+
+Tally (company) -> Tavily Discover (Search+Extract) -> Tavily Job Search -> LLM Classify (minimax) -> Gate -> Hunter Domain Search -> Select Best Person -> Hunter Found? --NO--> Tavily LinkedIn Search -> Prospeo (LinkedIn URL) -> Dropcontact fallback -> ZeroBounce -> Valid? --YES--> HubSpot + Slack | --NO--> Quarantine
+
+## Technologies Used
+
+- n8n — 27 nodes, single workflow WzvSZX5hAYXtZygU
+- Tavily — Discovery, extraction, job search, LinkedIn person search
+- OpenRouter minimax/m3:free — LLM classification (strict JSON)
+- Hunter — Domain search (primary person, 50/mo free)
+- Prospeo — Email from LinkedIn URL (primary email, 75/mo)
+- Dropcontact — Fallback enrichment (50 trial)
+- ZeroBounce — Verification gate (100 free, api-us.zerobounce.net)
+- HubSpot — Sandbox 247212224, 11 custom props
+- Slack — Block Kit to #all-fafo (C0BN1L6KDBR)
+
+## HubSpot Fields
+
+11 custom props: hiring_signal_type, hiring_signal_score, hiring_signal_confidence, hiring_signal_evidence, person_source (hunter/tavily), email_source (prospeo/dropcontact), email_status (valid), plus standard name/email/company.
+
+## Example Output
+
+Valid signal:
 
 ```
-Tally webhook (company + optional careers_url)
-  -> Tavily: discover careers page + search current GTM jobs
-  -> LLM (OpenRouter minimax): classify single strongest GTM hiring signal
-     [RevOps, SalesOps, MarketingOps, GTM, CRM, Sales Enablement, Demand Gen, Business Systems]
-  -> Hunter domain search (primary) -> score by function match (RevOps/GTM/SalesOps/MarketingOps/CRM)
-  -> Tavily LinkedIn fallback: find current employees in target functions
-  -> Prospeo (via LinkedIn URL) -> Dropcontact fallback -> ZeroBounce verify
-  -> HubSpot upsert contact (full enrichment) + Slack Block Kit #all-fafo
+{
+  "has_intent": true,
+  "tool_mentioned": "HubSpot",
+  "inferred_pain_point": "CRM migration bandwidth",
+  "hiring_signal_type": "RevOps",
+  "score": 0.82,
+  "confidence": 0.78
+}
 ```
 
-Only records with **valid email + positive intent** reach HubSpot/Slack. Everything else quarantined with reason.
+Quarantine: `quarantined: true, quarantine_reason: no_person_found / email_not_verified / no_hiring_intent`
 
-## Results
+## Follow-Up Logic
 
-| Metric | Value |
-|---|---|
-| Input | Tally webhook `POST /webhook/gtm-hiring-signal-v3` `{company_name, domain, careers_url?}` |
-| Career discovery | Tavily Search (if URL not supplied) + Tavily Extract |
-| Job search | Tavily Search targeted GTM role queries (`include_raw_content: true`) |
-| Classification | OpenRouter `minimax/minimax-m3:free` — strict schema, 8 signal types, score ≥0.55, confidence ≥0.55, evidence required |
-| Person finding | Primary: Hunter domain search (limit 10) + function scoring threshold ≥100<br>Fallback: Tavily LinkedIn search `site:linkedin.com/in/ + company + target_terms`, score ≥0.75 |
-| Email | Primary: Prospeo via LinkedIn URL + name + company<br>Fallback: Dropcontact enrichment (45s wait) |
-| Verification | ZeroBounce — only `status: valid` proceeds |
-| HubSpot | Upsert contact (portal `247212224`) with signal, person, email, source |
-| Slack | Block Kit to `#all-fafo` (C0BN1L6KDBR) |
-| Quarantine | Gates at: no intent, no person found, email not verified — tagged with reason |
+- No intent / score <0.55 -> quarantine, no HubSpot/Slack.
+- Hunter score <100 and Tavily LinkedIn <0.75 -> quarantine no_person_found.
+- Email not valid on ZeroBounce -> quarantine email_not_verified.
 
-## Architecture
+## Example Scenario
 
-**One workflow** (`WzvSZX5hAYXtZygU`, 27 nodes) with dual-path discovery and multi-tier fallbacks:
+Input: {company_name: "Linear", domain: "linear.app"} -> Tavily finds careers + 5 GTM jobs -> LLM classifies RevOps intent 0.82 -> Hunter finds 10 emails -> Select Best Person scores RevOps 120 -> Prospeo finds email -> ZeroBounce valid -> HubSpot contact created -> Slack card posted.
 
-- **Intake**: Tally-compatible webhook → normalize
-- **Discover**: Supplied URL → Tavily Extract **OR** Tavily Search careers → Choose best URL → Tavily Extract
-- **Aggregate**: Tavily Extract career page + Tavily Search current GTM jobs → Prepare Career Content (24k chars max)
-- **Classify**: LangChain InformationExtractor + OpenRouter minimax → Normalize Hiring Signal (validation gate)
-- **Gate**: `has_intent === true` + score/confidence/evidence thresholds
-- **Person (Tier 1)**: Hunter domain search → Select Best Person (function scoring RevOps/GTM/SalesOps/MarketingOps/CRM, threshold 100)
-- **Person (Tier 2)**: Tavily LinkedIn search → Parse → filter current employees in target functions (score ≥0.75)
-- **Email**: Prospeo (LinkedIn URL) → Dropcontact fallback → ZeroBounce
-- **Output**: Valid → HubSpot upsert contact + Slack Block Kit | Invalid/No-match → Quarantine
+## Demo
 
-## Stack
+- Tavily careers discovery + job aggregation (24k cap)
+- LLM strict schema classification
+- Hunter + Tavily LinkedIn fallback
+- Prospeo/Dropcontact + ZeroBounce waterfall
+- HubSpot upsert + Slack quarantine gates
 
-| Tool | Purpose | Tier |
-|---|---|---|
-| Tavily | Careers page discovery, extraction, job search, LinkedIn person search | Primary |
-| OpenRouter (minimax) | LLM classification | Free |
-| Hunter | Domain search → person emails | Primary person |
-| Prospeo | Email from LinkedIn URL | Primary email |
-| Dropcontact | Email enrichment fallback | Fallback |
-| ZeroBounce | Email verification gate | Gate |
-| HubSpot | Contact upsert (portal 247212224) | CRM |
-| Slack | Block Kit alert to `#all-fafo` | Notification |
-| n8n | Orchestration (single workflow) | Platform |
+Add Loom + screenshots here.
 
-All free tier or trial. No Clay. No custom Node/Python services.
+## Benefits
 
-## Repo Map
+- Finds real hiring intent, not keyword fluff
+- Targets hiring manager, not generic recruiter
+- Cheap-first waterfall protects free-tier credits
+- Strict gates prevent bad CRM writes
+- Quarantine reasons for debugging
 
-```
-workflows/           (empty — workflow lives in n8n, ID: WzvSZX5hAYXtZygU)
-tests/fixtures/      (to be populated: tavily-careers.json, tavily-jobs.json, hunter-results.json, 
-                      prospeo-email.json, zerobounce.json, hiring-signal.json)
-src/                 (validators, parsers — to be added)
-docs/
-  schema.md          field maps for each stage
-  runbook.md         rebuild-from-zero guide
-  decisions.md       D1–D8 locked
-  credentials.md     signup → credential → scopes for each tool
-  linkedin-post.md   announcement copy
-  loom-script.md     4-min demo script
-```
+## Security
 
-## Verification
+Never upload credentials. Tavily, OpenRouter, Hunter, Prospeo, Dropcontact, ZeroBounce, HubSpot, Slack tokens live in n8n only. Exports in workflows/ scrubbed.
 
-- **HubSpot portal 247212224**: Contacts show `hiring_signal_type`, `hiring_signal_score`, `hiring_signal_confidence`, `hiring_signal_evidence`, `person_source` (hunter/tavily), `email_source` (prospeo/dropcontact), `email_status` (valid)
-- **Slack `#all-fafo`**: Block Kit message with company, signal type, score, person name/title/email, source tags
-- **Quarantine**: Code nodes tag `quarantined: true` + `quarantine_reason` (no_hiring_intent | no_person_found | email_not_verified)
+## Possible Improvements
 
-## Next
+- Add Apollo as Tier 0 for broader coverage
+- Add multi-signal detection (not single strongest)
+- Add HubSpot Company + Deal association
+- Add Slack buttons for qualify/disqualify
 
-- Populate `tests/fixtures/` with live run payloads for each stage
-- Add `src/validateSignal.mjs` + `src/parseHunter.mjs` + `src/parseTavilyPerson.mjs` with TDD
-- Document credential acquisition for Tavily, Hunter, Prospeo, Dropcontact, ZeroBounce in `docs/credentials.md`
+## Project Status
+
+Completed — Demo / Portfolio Version — Live workflow WzvSZX5hAYXtZygU on Railway, webhook gtm-hiring-signal-v3.
+
+## Author
+
+Chiranjeev Sahu — GTM Engineering
+Skills Demonstrated: n8n Tavily LLM Classification Hunter Prospeo ZeroBounce HubSpot
